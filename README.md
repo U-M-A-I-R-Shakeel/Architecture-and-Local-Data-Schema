@@ -2,12 +2,14 @@
 
 The offline data layer for a queue (ticketing) app: how the user's **ticket**,
 their **queue position** and each office's **status** are stored on the
-phone, so the app keeps working with no internet connection.
+phone, so the app keeps working with no internet connection, plus the
+reactive **dashboard** that shows them (Task 8).
 
-![App reading everything from local storage](docs/screenshot.png)
+<img src="docs/screenshot.png" alt="Dashboard: ticket A-147, position 21, about 30 minutes, data marked out of date" width="320">
 
 ## Contents
 
+- [Task 8: Queue dashboard](#task-8-queue-dashboard)
 - [What's here](#whats-here)
 - [Run it](#run-it)
 - [Entities](#entities)
@@ -18,6 +20,101 @@ phone, so the app keeps working with no internet connection.
 - [Storage trade-offs](#storage-trade-offs)
 - [Tests](#tests)
 - [Fixes](#fixes)
+
+## Task 8: Queue dashboard
+
+The main screen shows the user's place in line. It updates the moment local
+storage changes, has proper loading and empty states, and stays smooth while
+data is being prepared.
+
+| Requirement | Where |
+|---|---|
+| Main dashboard screen | [`queue_dashboard_screen.dart`](lib/features/queue/presentation/queue_dashboard_screen.dart) |
+| State management that observes database changes | [`dashboard_controller.dart`](lib/features/queue/presentation/dashboard_controller.dart), [`dashboard_state.dart`](lib/features/queue/presentation/dashboard_state.dart), `QueueRepository.changes` |
+| Custom widgets for Queue Position and Wait Time | [`queue_position_card.dart`](lib/features/queue/presentation/widgets/queue_position_card.dart), [`wait_time_card.dart`](lib/features/queue/presentation/widgets/wait_time_card.dart) |
+| UI stays responsive during data processing | Background isolate + batched writes, see below |
+
+### How the screen stays in step with storage
+
+```
+ any write ──▶ SQLite ──▶ repository.changes ──▶ DashboardController ──▶ screen
+ (user, sync,           (one event per          (re-reads, builds one   (rebuilds only
+  simulator)             committed write)         DashboardState)          if it changed)
+```
+
+- **The database announces its own changes.** sqflite can't watch queries,
+  so `SqliteQueueRepository` emits on `changes` after every write commits.
+  Each action is one transaction with one event, so the screen never sees a
+  half-finished change, such as a new ticket before its position is set.
+- **The controller re-reads and publishes one state.** `DashboardController`
+  (a Flutter `ChangeNotifier`, so no extra package) listens, reads the
+  user's ticket, position and offices, and exposes one of four states:
+  `Loading`, `Empty`, `Ready` or `Error`. A burst of writes causes at most
+  one read in progress plus one after it, not one read per write. A read
+  that finds nothing new causes no rebuild.
+- **Actions only write.** "Take a ticket" and "Cancel" write to storage and
+  return. The new state comes back through the same change stream, so the
+  screen can't disagree with what is saved.
+- **Time passing counts as a change.** Every 30 seconds the controller
+  re-reads, so "may be out of date" appears on time even when nothing is
+  written.
+
+### States
+
+| State | What the user sees |
+|---|---|
+| Loading | A pulsing outline of the dashboard and "Preparing your offline queue…" (first launch builds 1000 sample tickets). |
+| Empty, offices saved | "You're not in a queue" and **Take a ticket**: pick an open office and service. |
+| Empty, nothing saved | "No office data yet. Connect once…". |
+| Ready, waiting | The Queue Position and Wait Time cards, side by side on wide screens. |
+| Ready, called | The card turns highlighted: "It's your turn. Please go to counter 3". |
+| Ready, being served | "Being served at counter 3". |
+| Error | The message and **Try again**. |
+
+A ticket taken offline shows `A-…` and a **Waiting to sync** chip until the
+server assigns its number.
+
+### The two custom widgets
+
+- **`QueuePositionCard`:** ticket code, office and service, the position as
+  a large number that slides to its new value when it changes, people ahead
+  ("You're next" at 1), and who is being served now. It changes to "go to
+  counter N" when called. It has a screen-reader label ("Position 21 in
+  line, 20 people ahead").
+- **`WaitTimeCard`:** estimated wait ("~30 min"), the clock time to expect
+  ("Expected around 13:00"), the sum behind it ("20 ahead × 6 min ÷ 4
+  counters") and how fresh the data is, in red with "may be out of date"
+  when it is over 5 minutes old.
+
+### Staying responsive
+
+- **No work before the first frame.** `main()` opens the database and shows
+  the UI straight away. The first-launch sample data is prepared after that,
+  while the loading state is showing.
+- **Heavy work off the UI thread.** The 1000 sample tickets are generated on
+  a background isolate (`Isolate.run`), so the loading animation never
+  stutters.
+- **Fewer trips to the database.** Saves are batched: 1000 tickets are two
+  database calls instead of 2000, inside one transaction. The sample-data
+  script went from about 1170 ms to 815 ms.
+- **Small reads, few rebuilds.** The dashboard reads one ticket, one
+  position and the offices (a few milliseconds), and only rebuilds when the
+  result differs.
+
+### Try it
+
+`flutter run`, then use the two buttons in the app bar. They play the part
+of the server, writing queue updates into local storage just as a sync
+would, so you can watch the dashboard react:
+
+- **Next customer:** the line moves by one. Any ticket taken offline is
+  synced and gets its number.
+- **Play/pause:** the line moves every 3 seconds until the user is called,
+  served, and back to the empty state.
+
+During office hours the sample data is "as of now". Outside them it is as of
+12:30, so the dashboard shows the out-of-date warning until the queue next
+moves.
 
 ## What's here
 
@@ -30,8 +127,8 @@ phone, so the app keeps working with no internet connection.
 
 ```
 lib/
-├── main.dart                         Opens the database, loads sample data on
-│                                     first launch, shows the screen
+├── main.dart                         Opens the database, shows the dashboard,
+│                                     prepares sample data on first launch
 ├── core/database/queue_database.dart Schema, indexes, migrations
 └── features/queue/
     ├── domain/                       Plain Dart, no Flutter or database code
@@ -40,9 +137,19 @@ lib/
     ├── data/
     │   ├── sqlite_queue_repository.dart
     │   ├── row_mappers.dart          Entity <-> database row
-    │   └── sample_data_generator.dart
+    │   ├── sample_data_generator.dart
+    │   └── queue_simulator.dart      Demo: moves the queue like a sync would
     └── presentation/
-        └── queue_home_screen.dart    Ticket, position, offices (offline)
+        ├── queue_dashboard_screen.dart   The main screen
+        ├── dashboard_controller.dart     Watches storage, publishes state
+        ├── dashboard_state.dart          Loading / Empty / Ready / Error
+        └── widgets/
+            ├── queue_position_card.dart  Queue Position widget
+            ├── wait_time_card.dart       Wait Time widget
+            ├── dashboard_skeleton.dart   Loading state
+            ├── empty_queue_view.dart     Empty state + take a ticket
+            ├── office_status_tile.dart
+            └── format.dart
 tool/generate_sample_data.dart        1000-row generator script
 sample_data/                          Generated queue_sample.db and .json
 docs/storage-tradeoffs.md
@@ -55,14 +162,14 @@ Requires Flutter 3.35 (Dart 3.9).
 ```bash
 flutter pub get
 flutter run                                    # the app (iOS or Android)
-flutter test                                   # 24 tests
+flutter test                                   # 39 tests
 dart run tool/generate_sample_data.dart        # regenerate sample_data/
 ```
 
-On first launch the app fills its empty database with a day of sample data
-(1000 tickets, 4 offices) and shows the user's ticket, place in line and every
-office's status, all read from local storage. The app makes no network
-calls.
+On first launch the app shows its loading state while it fills the empty
+database with a day of sample data (1000 tickets, 4 offices), then shows the
+user's ticket, place in line, estimated wait and every office's status, all
+read from local storage. The app makes no network calls.
 
 ## Entities
 
@@ -183,9 +290,12 @@ pattern.
 
 | Method | Does |
 |---|---|
+| `changes` | Stream that emits once after every committed write. The dashboard listens to it. |
+| `saveQueueUpdate(tickets:, offices:, now:)` | Saves a whole update (offices, tickets, recalculated positions) in one transaction, with one change event. |
+| `dispose()` | Closes `changes`. |
 | `getOffices()`, `getOfficeStatus(id)` | Read office status. |
 | `saveOfficeStatuses(list)` | Insert or update statuses (e.g. after sync). |
-| `saveTickets(list)` | Insert or update tickets in one transaction. Throws `QueueException` if a rule would break. |
+| `saveTickets(list)` | Insert or update tickets in one transaction, in two batches. Throws `QueueException` if a rule would break. |
 | `getTicket(id)`, `getQueue(officeId, date, statuses:)` | Read tickets, in line order. |
 | `getMyTickets(activeOnly:)` | The user's tickets, newest first. |
 | `getMyPosition(ticketId)` | `QueuePosition` for a waiting ticket. |
@@ -249,14 +359,15 @@ Hive, Isar and shared_preferences, and the costs of this choice, is in
 
 ## Tests
 
-`flutter test` runs 24 tests:
+`flutter test` runs 39 tests:
 
 | File | Covers |
 |---|---|
 | `entities_test.dart` | Ticket codes, statuses, wait estimate, staleness |
-| `sqlite_queue_repository_test.dart` | Office upsert, line order, positions, my position and how fresh it is, one active ticket per office, unique numbers, offline ticket and sync (including a clashing number), cancel, data kept after reopening |
+| `sqlite_queue_repository_test.dart` | Office upsert, line order, positions, my position and how fresh it is, one active ticket per office, unique numbers, offline ticket and sync (including a clashing number), cancel, one change event per write and none for a failed write, `saveQueueUpdate`, data kept after reopening |
 | `sample_data_generator_test.dart` | Exactly 1000 rows, same seed = same data, any time after opening with no future tickets, loaded data is consistent |
-| `queue_home_screen_test.dart` | Screen shows ticket, position, wait, offices and the out-of-date warning (fake repository) |
+| `dashboard_controller_test.dart` | Against real SQLite: loading until ready, preparation errors shown, state follows storage (take, sync, move up, cancel) with no refresh calls, bursts of writes coalesced, no rebuild for unchanged data, warning appears as data ages, the simulator moving the user to called and done |
+| `queue_dashboard_screen_test.dart` | Loading skeleton, both custom widgets' text, live update when storage changes (position, "You're next", called), out-of-date warning, take and cancel a ticket, error message, no-data empty state, side-by-side layout on wide screens |
 
 ## Fixes
 

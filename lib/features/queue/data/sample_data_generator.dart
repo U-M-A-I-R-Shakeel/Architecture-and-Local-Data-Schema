@@ -1,3 +1,4 @@
+import 'dart:isolate';
 import 'dart:math';
 
 import '../domain/entities/enums.dart';
@@ -216,15 +217,39 @@ SampleQueueData generateSampleQueueData({
   );
 }
 
-/// Saves [data] through the repository and works out every queue position.
-Future<void> loadSampleData(QueueRepository repo, SampleQueueData data) async {
-  await repo.saveOfficeStatuses(data.offices);
-  await repo.saveTickets(data.tickets);
-  for (final o in data.offices) {
-    await repo.recomputePositions(
-      o.officeId,
-      RowMappers.date(data.now),
+/// Saves [data] through the repository and works out every queue position,
+/// all in one transaction.
+Future<void> loadSampleData(QueueRepository repo, SampleQueueData data) =>
+    repo.saveQueueUpdate(
+      offices: data.offices,
+      tickets: data.tickets,
       now: data.now,
     );
-  }
+
+/// [generateSampleQueueData] on a background isolate, so building 1000
+/// tickets never blocks the UI thread (no dropped frames while the app's
+/// loading screen animates).
+///
+/// Kept as its own function so the closure sent to the isolate captures
+/// only these plain values, not a database or repository.
+Future<SampleQueueData> generateSampleQueueDataInBackground({
+  int count = 1000,
+  int seed = 42,
+  required DateTime now,
+}) => Isolate.run(
+  () => generateSampleQueueData(count: count, seed: seed, now: now),
+);
+
+/// First launch: if nothing is stored yet, generates a day of sample data in
+/// the background and saves it. Returns whether it did.
+Future<bool> seedSampleDataIfEmpty(
+  QueueRepository repo, {
+  required DateTime now,
+}) async {
+  if (await repo.countTickets() > 0) return false;
+  await loadSampleData(
+    repo,
+    await generateSampleQueueDataInBackground(now: now),
+  );
+  return true;
 }

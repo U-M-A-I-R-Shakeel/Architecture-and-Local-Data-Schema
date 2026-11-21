@@ -276,6 +276,81 @@ void main() {
     expect(await repo.getPendingChanges(), isEmpty);
   });
 
+  test('each write is announced once, after it is saved', () async {
+    var events = 0;
+    final sub = repo.changes.listen((_) => events++);
+    addTearDown(sub.cancel);
+    Future<int> count(Future<void> Function() write) async {
+      events = 0;
+      await write();
+      await pumpEventQueue();
+      return events;
+    }
+
+    expect(await count(() => repo.saveTickets([ticket(1), ticket(2)])), 1);
+    expect(
+      await count(() => repo.recomputePositions('main', day, now: now)),
+      1,
+    );
+    // Save + recalculate positions: still one change, so a listener never
+    // sees the new ticket without its position.
+    late Ticket t;
+    expect(
+      await count(() async {
+        t = await repo.requestTicketOffline(
+          officeId: 'main',
+          serviceCode: 'A',
+          now: now,
+        );
+      }),
+      1,
+    );
+    expect(await count(() => repo.markSynced(t.id, assignedNumber: 3)), 1);
+    expect(await count(() => repo.cancelMyTicket(t.id, now: now)), 1);
+    expect(
+      await count(
+        () => repo.saveQueueUpdate(
+          tickets: [ticket(4)],
+          offices: [office('main')],
+          now: now,
+        ),
+      ),
+      1,
+    );
+    // A write that fails changes nothing and announces nothing.
+    expect(
+      await count(() async {
+        try {
+          await repo.saveTickets([
+            ticket(5, mine: true),
+            ticket(6, mine: true),
+          ]);
+        } on QueueException {
+          // expected
+        }
+      }),
+      0,
+    );
+    expect(await repo.getTicket('main-A-5'), isNull);
+  });
+
+  test(
+    'saveQueueUpdate saves offices and tickets and sets positions',
+    () async {
+      await repo.saveQueueUpdate(
+        offices: [office('main').copyWith(waitingCount: 2)],
+        tickets: [
+          ticket(1, status: TicketStatus.serving),
+          ticket(2),
+          ticket(3),
+        ],
+        now: now,
+      );
+      expect((await repo.getOfficeStatus('main'))!.waitingCount, 2);
+      expect(await positions(), {'A-001': null, 'A-002': 1, 'A-003': 2});
+    },
+  );
+
   test('everything survives closing and reopening the database', () async {
     final dir = Directory.systemTemp.createTempSync('queue_db');
     addTearDown(() => dir.deleteSync(recursive: true));

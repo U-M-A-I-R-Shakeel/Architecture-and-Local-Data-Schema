@@ -16,6 +16,14 @@ class QueueException implements Exception {
 /// app and the sync code never touch the database directly, so the storage
 /// library can change without touching them.
 abstract interface class QueueRepository {
+  // Change notifications ---------------------------------------------------
+
+  /// Emits after every write that has been committed to storage (tickets,
+  /// positions or office status). Screens listen to it and re-read, so they
+  /// update the moment local data changes, whoever changed it (the user, a
+  /// sync, a background job).
+  Stream<void> get changes;
+
   // Offices ----------------------------------------------------------------
 
   /// Every office, by name.
@@ -57,6 +65,15 @@ abstract interface class QueueRepository {
     required DateTime now,
   });
 
+  /// Saves a queue update (e.g. from a sync) in one step: office statuses,
+  /// tickets, and recalculated positions for every line the tickets are in.
+  /// Listeners on [changes] are told once, when it is all saved.
+  Future<void> saveQueueUpdate({
+    required List<Ticket> tickets,
+    List<OfficeStatus> offices = const [],
+    required DateTime now,
+  });
+
   // Offline actions --------------------------------------------------------
 
   /// Takes a ticket while offline. It is saved as `pendingCreate` with no
@@ -79,4 +96,7 @@ abstract interface class QueueRepository {
   Future<void> markSynced(String ticketId, {int? assignedNumber});
 
   Future<int> countTickets();
+
+  /// Stops [changes]. Call when the app shuts down.
+  Future<void> dispose();
 }

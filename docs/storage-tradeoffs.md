@@ -52,7 +52,7 @@ Check pub.dev before starting a new project.
 | Cost | How this project handles it |
 |---|---|
 | **Hand-written SQL and row mapping.** A typo in a column name only fails at run time. | All mapping is in one file (`row_mappers.dart`); repository tests cover every query. Moving to drift would make queries type-checked. |
-| **No live updates.** The screen doesn't refresh by itself when data changes. | The screen reloads on pull-to-refresh. A state-management layer (or drift's `watch()`) can add live updates later. |
+| **No live updates.** sqflite can't watch a query, so the screen doesn't learn about changes by itself. | The repository announces its own writes on a `changes` stream (one event per committed transaction), and `DashboardController` re-reads on each one. This only sees writes made through the repository; drift's `watch()` would also catch raw SQL. |
 | **Android uses the phone's own SQLite**, and older phones have old versions: Android 7 ships SQLite 3.9. `ON CONFLICT … DO UPDATE` (upsert) needs 3.24 and window functions need 3.25, which only Android 11+ have. | No upsert or window functions are used. Saves are "update by id, insert if missing"; positions use a correlated `COUNT(*)` subquery. |
 | **`INSERT OR REPLACE` is a trap.** On a clash with any unique index it silently deletes the *other* row. In this model that would delete the user's existing ticket. | Not used. A clash raises an error, which the repository turns into a `QueueException`. Found by a test during development. |
 | **No date type.** | Dates are ISO 8601 text (`2026-11-21T12:30:00.000`), days are `yyyy-MM-dd`; both sort correctly as text. |
