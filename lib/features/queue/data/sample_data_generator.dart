@@ -38,6 +38,13 @@ SampleQueueData generateSampleQueueData({
   final rnd = Random(seed);
   final day = RowMappers.date(now);
   final opening = DateTime(now.year, now.month, now.day, 9);
+  if (!now.isAfter(opening)) {
+    throw ArgumentError.value(
+      now,
+      'now',
+      'must be after 09:00, when the offices open and start issuing tickets',
+    );
+  }
   DateTime at(DateTime from, int minutes) =>
       from.add(Duration(minutes: minutes));
 
@@ -70,10 +77,10 @@ SampleQueueData generateSampleQueueData({
   Ticket? mine;
   for (final o in officeDefs) {
     final (officeId, _, isOpen, counters, avg, _) = o;
-    // A closed office stopped issuing at 11:30 and has served everyone.
-    final lastIssue = isOpen
-        ? now
-        : DateTime(now.year, now.month, now.day, 11, 30);
+    // A closed office stopped issuing at 11:30 (or now, if earlier) and has
+    // served everyone. No ticket is ever issued after [now].
+    final closedAt = DateTime(now.year, now.month, now.day, 11, 30);
+    final lastIssue = isOpen || now.isBefore(closedAt) ? now : closedAt;
     final span = lastIssue.difference(opening).inMinutes;
 
     for (final (service, _) in services) {

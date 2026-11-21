@@ -108,6 +108,34 @@ void main() {
     expect((await repo.getMyPosition('main-A-5'))!.position, 4);
   });
 
+  test(
+    'a position counted on the device is as old as the synced data',
+    () async {
+      // Last server data at 10:00; the user takes a ticket offline at 15:00.
+      final syncedAt = DateTime(2026, 11, 21, 10);
+      final later = DateTime(2026, 11, 21, 15);
+      await repo.saveOfficeStatuses([
+        office('main').copyWith(syncedAt: syncedAt, updatedAt: syncedAt),
+      ]);
+      await repo.saveTickets([ticket(1), ticket(2)]);
+      final t = await repo.requestTicketOffline(
+        officeId: 'main',
+        serviceCode: 'A',
+        now: later,
+      );
+      final pos = (await repo.getMyPosition(t.id))!;
+      expect(pos.position, 3);
+      expect(pos.asOf, syncedAt);
+      expect(pos.isStale(later), isTrue);
+
+      // After a fresh sync the position is current again.
+      await repo.saveOfficeStatuses([
+        office('main').copyWith(syncedAt: later, updatedAt: later),
+      ]);
+      expect((await repo.getMyPosition(t.id))!.isStale(later), isFalse);
+    },
+  );
+
   test('no position for a ticket that is not waiting', () async {
     await repo.saveTickets([
       ticket(1, status: TicketStatus.called, mine: true),
@@ -179,6 +207,29 @@ void main() {
     expect(synced.syncState, SyncState.synced);
     expect(await repo.getPendingChanges(), isEmpty);
   });
+
+  test(
+    'syncing with a number already in the line is a QueueException',
+    () async {
+      await repo.saveTickets([ticket(1), ticket(2)]);
+      final t = await repo.requestTicketOffline(
+        officeId: 'main',
+        serviceCode: 'A',
+        now: now,
+      );
+      await expectLater(
+        repo.markSynced(t.id, assignedNumber: 2),
+        throwsA(isA<QueueException>()),
+      );
+      final unchanged = (await repo.getTicket(t.id))!;
+      expect(unchanged.number, isNull);
+      expect(unchanged.syncState, SyncState.pendingCreate);
+      await expectLater(
+        repo.markSynced('missing'),
+        throwsA(isA<QueueException>()),
+      );
+    },
+  );
 
   test('cannot take a ticket at a closed or unknown office', () async {
     await repo.saveOfficeStatuses([office('closed', open: false)]);

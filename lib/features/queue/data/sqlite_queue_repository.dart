@@ -143,11 +143,14 @@ class SqliteQueueRepository implements QueueRepository {
     }
     final office = await getOfficeStatus(ticket.officeId);
     if (office == null) return null;
+    // A position recalculated on the device is only as fresh as the queue
+    // data it was counted from, so use whichever is older.
+    final computedAt = ticket.positionUpdatedAt ?? ticket.updatedAt;
     return QueuePosition(
       ticket: ticket,
       office: office,
       position: ticket.position!,
-      asOf: ticket.positionUpdatedAt ?? ticket.updatedAt,
+      asOf: office.syncedAt.isBefore(computedAt) ? office.syncedAt : computedAt,
     );
   }
 
@@ -272,12 +275,22 @@ class SqliteQueueRepository implements QueueRepository {
 
   @override
   Future<void> markSynced(String ticketId, {int? assignedNumber}) async {
-    final count = await _db.update(
-      'tickets',
-      {'sync_state': SyncState.synced.dbValue, 'number': ?assignedNumber},
-      where: 'id = ?',
-      whereArgs: [ticketId],
-    );
+    final int count;
+    try {
+      count = await _db.update(
+        'tickets',
+        {'sync_state': SyncState.synced.dbValue, 'number': ?assignedNumber},
+        where: 'id = ?',
+        whereArgs: [ticketId],
+      );
+    } on DatabaseException catch (e) {
+      if (e.isUniqueConstraintError()) {
+        throw QueueException(
+          'Ticket number $assignedNumber is already used in this line.',
+        );
+      }
+      rethrow;
+    }
     if (count == 0) throw QueueException('No ticket "$ticketId".');
   }
 

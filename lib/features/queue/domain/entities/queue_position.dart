@@ -17,7 +17,8 @@ class QueuePosition {
   /// 1 means next.
   final int position;
 
-  /// When the position was last worked out. Shown as "as of 10:42".
+  /// How fresh the position is: when it was worked out, or when the office's
+  /// queue data was last synced if that is older. Shown as "as of 10:42".
   final DateTime asOf;
 
   int get peopleAhead => position - 1;

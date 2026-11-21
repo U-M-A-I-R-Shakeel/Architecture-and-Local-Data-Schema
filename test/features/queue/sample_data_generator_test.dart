@@ -16,6 +16,25 @@ void main() {
     expect(generateSampleQueueData(count: 50, now: now).tickets, hasLength(50));
   });
 
+  test('works for any time after opening, never issues in the future', () {
+    for (final (h, m) in [(9, 1), (10, 0), (11, 45), (16, 59)]) {
+      final at = DateTime(2026, 11, 21, h, m);
+      final data = generateSampleQueueData(now: at);
+      expect(data.tickets, hasLength(1000), reason: '$h:$m');
+      expect(
+        data.tickets.every((t) => !t.issuedAt.isAfter(at)),
+        isTrue,
+        reason: '$h:$m',
+      );
+    }
+    for (final (h, m) in [(9, 0), (8, 0)]) {
+      expect(
+        () => generateSampleQueueData(now: DateTime(2026, 11, 21, h, m)),
+        throwsArgumentError,
+      );
+    }
+  });
+
   test('loaded through the repository, the data is consistent', () async {
     final (db, repo) = await openRepo();
     addTearDown(db.close);
