@@ -17,6 +17,7 @@ phone, so the app keeps working with no internet connection.
 - [Sample data: 1000 rows](#sample-data-1000-rows)
 - [Storage trade-offs](#storage-trade-offs)
 - [Tests](#tests)
+- [Fixes](#fixes)
 
 ## What's here
 
@@ -54,7 +55,7 @@ Requires Flutter 3.35 (Dart 3.9).
 ```bash
 flutter pub get
 flutter run                                    # the app (iOS or Android)
-flutter test                                   # 21 tests
+flutter test                                   # 24 tests
 dart run tool/generate_sample_data.dart        # regenerate sample_data/
 ```
 
@@ -111,7 +112,7 @@ Not stored; built by the repository from a ticket and its office.
 |---|---|
 | `position`, `peopleAhead` | Place in line and people in front. |
 | `estimatedWait` | `peopleAhead × averageServiceMinutes ÷ countersOpen`, rounded up. |
-| `asOf` | When the position was worked out. |
+| `asOf` | How fresh the position is: when it was worked out, or when the office's data was last synced (`syncedAt`), whichever is older. |
 | `isStale(now)` | Older than 5 minutes: the app says "may be out of date". |
 
 ## Database schema
@@ -155,8 +156,10 @@ SQL steps; existing installs run only the new steps.
   Finished tickets lose their position. The user's position is then a
   single-row read.
 - **How fresh is it.** Every position keeps `positionUpdatedAt`, and every
-  office status keeps `updatedAt` and `syncedAt`. The app shows "as of
-  12:30" and warns when the data is over 5 minutes old, instead of
+  office status keeps `updatedAt` and `syncedAt`. A position recalculated
+  on the phone is only as fresh as the data it was counted from, so "as of"
+  is the older of `positionUpdatedAt` and the office's `syncedAt`. The app
+  shows "as of 12:30" and warns when that is over 5 minutes old, instead of
   pretending it's live.
 - **Actions while offline.**
   - *Take a ticket:* saved as `pendingCreate`, with no number (`A-…`) and an
@@ -165,7 +168,9 @@ SQL steps; existing installs run only the new steps.
   - *Cancel:* a synced ticket becomes `cancelled` + `pendingCancel`, and
     everyone behind moves up. A ticket the server never saw is just deleted.
 - **Sync outbox.** `getPendingChanges()` lists what to send when the
-  connection returns; `markSynced()` clears each item. A sync service
+  connection returns; `markSynced()` clears each item. If the server's
+  number is already used in that line, `markSynced()` throws a
+  `QueueException` and leaves the ticket pending. A sync service
   (not part of this task) would call these, then save the server's latest
   tickets and office statuses.
 
@@ -186,7 +191,7 @@ pattern.
 | `getMyPosition(ticketId)` | `QueuePosition` for a waiting ticket. |
 | `recomputePositions(officeId, date, now:)` | Recalculate positions from local data. |
 | `requestTicketOffline(...)`, `cancelMyTicket(...)` | Offline actions. |
-| `getPendingChanges()`, `markSynced(id, assignedNumber:)` | Sync outbox. |
+| `getPendingChanges()`, `markSynced(id, assignedNumber:)` | Sync outbox. `markSynced` throws `QueueException` for an unknown ticket or a number already in use. |
 | `countTickets()` | Row count. |
 
 Implemented by
@@ -224,6 +229,10 @@ run on the generated file found no gaps in any line's positions, no finished
 ticket with a position, no duplicate numbers, and office waiting counts that
 match the tickets.
 
+From code, `generateSampleQueueData(now: ...)` accepts any time after 09:00
+(opening time) and never creates a ticket issued after `now`. An earlier
+time throws an `ArgumentError`.
+
 ## Storage trade-offs
 
 The app uses SQLite through **sqflite**. The full comparison with drift,
@@ -240,11 +249,21 @@ Hive, Isar and shared_preferences, and the costs of this choice, is in
 
 ## Tests
 
-`flutter test` runs 21 tests:
+`flutter test` runs 24 tests:
 
 | File | Covers |
 |---|---|
 | `entities_test.dart` | Ticket codes, statuses, wait estimate, staleness |
-| `sqlite_queue_repository_test.dart` | Office upsert, line order, positions, my position, one active ticket per office, unique numbers, offline ticket and sync, cancel, data kept after reopening |
-| `sample_data_generator_test.dart` | Exactly 1000 rows, same seed = same data, loaded data is consistent |
+| `sqlite_queue_repository_test.dart` | Office upsert, line order, positions, my position and how fresh it is, one active ticket per office, unique numbers, offline ticket and sync (including a clashing number), cancel, data kept after reopening |
+| `sample_data_generator_test.dart` | Exactly 1000 rows, same seed = same data, any time after opening with no future tickets, loaded data is consistent |
 | `queue_home_screen_test.dart` | Screen shows ticket, position, wait, offices and the out-of-date warning (fake repository) |
+
+## Fixes
+
+Found while checking the first version; each now has a test.
+
+| Problem | Fix |
+|---|---|
+| **Old data shown as current.** Recalculating positions on the phone stamped them with the current time. A ticket taken offline at 15:00 from data synced at 10:00 showed "As of 15:00" with no warning. | `getMyPosition` uses the older of the recalculation time and the office's `syncedAt`, so it now shows "As of 10:00 · may be out of date". |
+| **Raw database error on sync.** `markSynced` with a number already used in the line threw a SQLite exception. | It throws a `QueueException`, like `saveTickets`, and the ticket stays pending. |
+| **Generator crash before opening.** `generateSampleQueueData` with a time at or before 09:00 crashed (`RangeError`), and before 11:30 the closed office got tickets issued after `now`. | Times at or before 09:00 throw a clear `ArgumentError`; no ticket is issued after `now`. The script itself always uses 12:30. |
